@@ -1,8 +1,9 @@
-# 模拟面试 API 对接文档（V1.1）
+# 模拟面试 API 对接文档（V2.0）
 
-> 用途：支持前端“模拟面试对话页”与后端大语言模型考官能力对接。  
-> 前端页面：/pages/interview/interview_chat  
+> 用途：前端「模拟面试对话页」与后端大语言模型考官能力对接
+> 前端页面：/pages/interview/interview_chat
 > 联调基线：`http://127.0.0.1:3000/api/v1`
+> 更新日期：2026-03-29
 
 ---
 
@@ -24,7 +25,7 @@
 }
 ```
 
-### 1.2 错误码建议
+### 1.2 错误码
 
 | code | 含义 |
 |---|---|
@@ -38,37 +39,73 @@
 
 ---
 
-## 2. 会话状态模型（建议）
+## 2. 面试流程说明（核心）
 
-集合建议：`interview_sessions`
+### 2.1 发言顺序规则
 
-```json
-{
-  "_id": "ObjectId",
-  "sessionId": "is_20260321_0001",
-  "userId": "u_10001",
-  "job_role": "前端开发工程师",
-  "status": "active",
-  "currentRound": 3,
-  "totalRounds": 10,
-  "messages": [
-    { "role": "ai", "content": "请先做一个自我介绍", "ts": "2026-03-21T10:00:00+08:00" },
-    { "role": "user", "content": "你好，我是...", "ts": "2026-03-21T10:00:20+08:00" }
-  ],
-  "scores": {
-    "tech": 82,
-    "logic": 78,
-    "expression": 80,
-    "stability": 76
-  },
-  "createdAt": "2026-03-21T10:00:00+08:00",
-  "updatedAt": "2026-03-21T10:03:00+08:00"
-}
+| 发言序号 | 内容要求 | 触发条件 |
+|---|---|---|
+| 发言 1（首轮） | **只有问题**，无点评 | start 接口返回 |
+| 发言 2~10 | **点评 + 问题** | 每轮 answer 返回 |
+| 发言 11 | **只有点评**，无问题 | 第 10 题回答完毕后，触发弹窗 |
+| 发言 12（继续后首轮） | **只有问题**，无点评 | decision=continue 返回 |
+| 发言 13~16 | **点评 + 问题** | 每轮 answer 返回 |
+| 发言 17 | **只有点评**，无问题 | 第 15 题回答完毕后，触发弹窗 |
+| 发言 18（再继续） | **只有问题**，无点评 | decision=continue 返回 |
+| ... | ... | 以此类推 |
+
+### 2.2 流程图
+
 ```
+┌─────────────────────────────────────────────────────────────┐
+│ 初始阶段（10题）                                             │
+│                                                             │
+│  发言1: 问题1（start返回）                                    │
+│  考生回答1                                                   │
+│  发言2: 点评1 + 问题2                                        │
+│  考生回答2                                                   │
+│  ...                                                        │
+│  发言10: 点评9 + 问题10                                      │
+│  考生回答10                                                  │
+│  发言11: 点评10（无问题）→ 弹窗：继续问答 / 结束面试            │
+└─────────────────────────────────────────────────────────────┘
+                            ↓ 选择"继续问答"
+┌─────────────────────────────────────────────────────────────┐
+│ 继续阶段（新增5题，共10题）                                   │
+│                                                             │
+│  发言12: 问题11（decision返回，只有问题）                      │
+│  考生回答11                                                  │
+│  发言13: 点评11 + 问题12                                     │
+│  考生回答12                                                  │
+│  ...                                                        │
+│  发言16: 点评15 + 问题16                                      │
+│  考生回答16                                                  │
+│  发言17: 点评16（无问题）→ 弹窗：继续问答 / 结束面试            │
+└─────────────────────────────────────────────────────────────┘
+                            ↓ 选择"继续问答"
+┌─────────────────────────────────────────────────────────────┐
+│ 再继续阶段（再新增5题，共20题）                                │
+│                                                             │
+│  发言18: 问题17（decision返回，只有问题）                      │
+│  ...                                                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2.3 前端判断逻辑（已实现）
+
+前端根据以下字段判断如何展示：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `awaitChoice` | boolean | true 时弹出继续/结束按钮 |
+| `mustChoose` | boolean | 强制决策点，与 awaitChoice 效果相同 |
+| `phase` | string | 为 "checkpoint" 时触发决策 |
+| `status` | string | 为 "checkpoint" 时触发决策 |
+| `decisionOptions` | array | 决策选项，如 ["end", "continue"] |
 
 ---
 
-## 3. 接口定义（前端当前已接）
+## 3. 接口定义
 
 ## 3.1 开始面试
 
@@ -80,42 +117,67 @@
 
 ```json
 {
-  "job_role": "前端开发工程师"
+  "job_role": "前端开发工程师",
+  "resume": {
+    "name": "张三",
+    "workYears": "3-5年",
+    "techStack": "Vue3, TypeScript, Node.js",
+    "directions": ["前端", "后端"],
+    "projects": [
+      {
+        "name": "电商后台系统",
+        "responsibility": "前端架构设计",
+        "challengeSolution": "解决了首屏加载慢的问题",
+        "quantResult": "首屏加载从 3s 优化到 1.2s"
+      }
+    ]
+  },
+  "question_policy": {
+    "mode": "balanced",
+    "randomness": "high",
+    "avoid_repeat": true,
+    "diversify_topics": true
+  },
+  "knowledge_scope": "general"
 }
 ```
 
-### 推荐岗位枚举（含新增）
-
-- 前端开发工程师
-- Java 开发工程师
-- 网络工程师
-- 大模型应用开发工程师
-
-### Success Response（推荐）
+### Success Response
 
 ```json
 {
   "code": 0,
   "message": "ok",
   "data": {
-    "sessionId": "is_20260321_0001",
+    "sessionId": "is_20260329_0001",
     "currentRound": 1,
     "totalRounds": 10,
-    "question": "你好，欢迎来到前端开发岗位模拟面试。请先做一个 1 分钟自我介绍。"
+    "question": "你好，欢迎来到前端开发工程师模拟面试。请先做一个 1 分钟自我介绍。"
   }
 }
 ```
 
-### 兼容字段（前端已容错）
+### 字段说明
 
-- `session_id`（可替代 `sessionId`）
-- `round`（可替代 `currentRound`）
-- `total_rounds`（可替代 `totalRounds`）
-- `firstQuestion`（可替代 `question`）
+| 字段 | 类型 | 必须 | 说明 |
+|---|---|---|---|
+| sessionId | string | 是 | 会话 ID |
+| currentRound | int | 是 | 当前轮次，从 1 开始 |
+| totalRounds | int | 是 | 总轮次，初始为 10 |
+| question | string | 是 | **首轮只需要问题**，不需要点评 |
+
+### 兼容字段
+
+| 推荐字段 | 兼容字段 |
+|---|---|
+| sessionId | session_id |
+| currentRound | round, current_round |
+| totalRounds | total_rounds |
+| question | firstQuestion |
 
 ---
 
-## 3.2 提交回答并获取下一题
+## 3.2 提交回答
 
 - Method：`POST`
 - URL：`/interview/answer`
@@ -125,104 +187,167 @@
 
 ```json
 {
-  "sessionId": "is_20260321_0001",
+  "sessionId": "is_20260329_0001",
   "job_role": "前端开发工程师",
   "round": 1,
-  "answer": "我有 3 年前端经验，主栈是 Vue3 和 TypeScript..."
+  "answer": "我有 3 年前端经验，主要使用 Vue3 和 TypeScript...",
+  "question_policy": {
+    "mode": "balanced",
+    "randomness": "high",
+    "avoid_repeat": true,
+    "diversify_topics": true,
+    "max_project_followups": 2
+  },
+  "knowledge_scope": "general",
+  "asked_questions": ["你好，欢迎...", "请先做自我介绍"]
 }
 ```
 
-### Success Response（推荐）
+### Success Response（常规回答，第 2~9 题）
 
 ```json
 {
   "code": 0,
   "message": "ok",
   "data": {
+    "answeredRound": 1,
     "currentRound": 2,
     "totalRounds": 10,
-    "nextQuestion": "请你讲一个性能优化的真实案例，并说明你如何量化收益。",
-    "finished": false,
-    "instantFeedback": {
-      "keyword": ["结构清晰", "案例偏少"],
-      "scoreHint": 81
-    }
+    "review": "你的自我介绍结构清晰，技术栈提到了 Vue3 和 TS，很好。建议可以补充一下项目规模和你的具体贡献。",
+    "nextQuestion": "你提到做过性能优化，能具体讲讲你是如何定位和解决一个线上性能问题的吗？",
+    "finished": false
   }
 }
 ```
 
-### 兼容字段（前端已容错）
-
-- `round`（可替代 `currentRound`）
-- `total_rounds`（可替代 `totalRounds`）
-- `question` / `reply`（可替代 `nextQuestion`）
-
----
-
-## 3.3 结束面试
-
-- Method：`POST`
-- URL：`/interview/end`
-- Auth：是
-
-### Request Body
-
-```json
-{
-  "sessionId": "is_20260321_0001",
-  "job_role": "前端开发工程师"
-}
-```
-
-### Success Response（推荐）
+### Success Response（阶段末尾回答，第 10/15/20 题）
 
 ```json
 {
   "code": 0,
   "message": "ok",
   "data": {
-    "sessionId": "is_20260321_0001",
-    "status": "finished",
-    "summary": "表达清晰，技术细节较扎实，建议补充更多业务结果量化。",
-    "finalScore": 84,
-    "dimensions": {
-      "tech": 86,
-      "logic": 83,
-      "expression": 85,
-      "stability": 82
-    }
+    "answeredRound": 10,
+    "currentRound": 10,
+    "totalRounds": 10,
+    "review": "整体表现不错，技术深度可以，建议加强系统设计方面的准备。",
+    "nextQuestion": null,
+    "finished": false,
+    "awaitChoice": true
   }
 }
 ```
 
+### 字段说明
+
+| 字段 | 类型 | 必须 | 说明 |
+|---|---|---|---|
+| review | string | 否 | **点评文本**，前端先显示点评再显示下一题 |
+| nextQuestion | string | 否 | **下一题**，第 10/15/20 题时返回 null |
+| awaitChoice | boolean | 否 | true 时前端弹出继续/结束按钮 |
+| decisionOptions | array | 否 | 决策选项，如 ["end", "continue"] |
+
+### 重要规则
+
+1. **第 1 题返回**：只有 `question`，不需要 `review`
+2. **第 2~9 题返回**：必须同时有 `review` + `nextQuestion`
+3. **第 10/15/20 题返回**：
+   - 必须有 `review`
+   - `nextQuestion` 必须为 `null` 或不返回
+   - 必须设置 `awaitChoice: true`
+
+### 兼容字段
+
+| 推荐字段 | 兼容字段 |
+|---|---|
+| review | comment, feedback, summary |
+| nextQuestion | question, reply |
+| awaitChoice | mustChoose, phase==="checkpoint" |
+| decisionOptions | decision_options |
+
+### ⚠️ 后端 LLM 输出解析规范（必须实现）
+
+后端 LLM（DeepSeek）输出格式为：
+```
+评价：...（1句）
+纠正：...（可无，若回答正确可写"无明显错误"）
+下一题：...
+```
+
+**后端必须解析这个输出，分成两个字段返回：**
+
+```python
+# next_question 函数返回值必须包含：
+{
+    "stage": state["stage"],
+    "turn_count": state["turn_count"],
+    "review": "评价：...纠正：...",      # 包含"评价"和"纠正"部分
+    "next_question": "下一题：...",     # 只有下一题，不包含评价和纠正
+    "is_vague": state["is_vague"],
+    "trace": state.get("trace") or [],
+    "retrieval": state.get("retrieval") or {},
+}
+```
+
+**解析逻辑示例（Python）：**
+
+```python
+def parse_llra_output(raw_output: str, job_role: str) -> dict:
+    """解析 LLM 输出，分离 review 和 next_question"""
+    lines = raw_output.split('\n')
+    review_parts = []
+    next_question = ""
+
+    for line in lines:
+        line = line.strip()
+        if line.startswith("评价："):
+            review_parts.append(line)
+        elif line.startswith("纠正："):
+            review_parts.append(line)
+        elif line.startswith("下一题："):
+            next_question = line
+        elif line.startswith("无明显错误"):
+            review_parts.append("纠正：无明显错误")
+
+    review = "\n".join(review_parts) if review_parts else ""
+    if not next_question:
+        # 兜底：如果解析失败，至少返回原始内容
+        next_question = raw_output
+
+    return {
+        "review": review,
+        "next_question": next_question
+    }
+```
+
+**关键点：**
+- `review` 字段包含"评价"和"纠正"，前端会先显示这部分
+- `next_question` 字段只有"下一题：..."，前端会单独显示这道题
+- **严禁**把"评价+纠正+下一题"全部放在 `question` 字段中返回
+
 ---
 
-## 3.4 阶段节点选择（第 10/15/20 ... 题）
+## 3.3 提交决策
 
 - Method：`POST`
 - URL：`/interview/decision`
 - Auth：是
 
-### 场景说明
-
-- 当后端返回 `awaitChoice=true`（或文案提示“结束/继续”）时，前端进入节点选择态。
-- 考生可通过两种方式选择：
-  1) 点击按钮；
-  2) 直接输入文本并发送。
-
-### 文本判定规则（前端已实现）
-
-- 若考生回复包含 `结束面试 / 结束问答 / 结束 / end` -> 判定为 `decision=end`。
-- 若考生回复包含 `继续问答 / 继续面试 / 继续 / continue` -> 判定为 `decision=continue`。
-- 其他文本提示“请输入继续问答或结束面试”，不调用决策接口。
-
 ### Request Body
 
 ```json
 {
-  "sessionId": "is_20260321_0001",
+  "sessionId": "is_20260329_0001",
   "job_role": "前端开发工程师",
-  "decision": "continue"
+  "decision": "continue",
+  "question_policy": {
+    "mode": "balanced",
+    "randomness": "high",
+    "avoid_repeat": true,
+    "diversify_topics": true
+  },
+  "knowledge_scope": "general",
+  "asked_questions": ["问题1...", "问题2..."]
 }
 ```
 
@@ -233,11 +358,12 @@
   "code": 0,
   "message": "ok",
   "data": {
+    "sessionId": "is_20260329_0001",
     "decision": "continue",
     "currentRound": 11,
     "totalRounds": 15,
-    "nextQuestion": "好的，我们继续。请说明你做过的一个复杂故障排查案例。",
-    "finished": false
+    "nextQuestion": "我们继续深入讨论。请讲一个你在项目中遇到的最大技术挑战是什么，你是如何解决的？",
+    "awaitChoice": false
   }
 }
 ```
@@ -249,90 +375,121 @@
   "code": 0,
   "message": "ok",
   "data": {
+    "sessionId": "is_20260329_0001",
     "decision": "end",
-    "status": "finished",
-    "question": "好的，本次面试到此结束，我将为你生成评估报告。",
-    "finished": true
+    "message": "好的，本次面试到此结束。我将为你生成评估报告。"
   }
 }
 ```
 
----
+### 重要规则
 
-## 4. 推荐扩展接口（第二阶段）
+1. **decision=continue 返回**：
+   - `nextQuestion` **只需要问题**，不需要 review/点评
+   - `totalRounds` 更新为 15（继续5题后的总数）
+   - `awaitChoice` 必须为 false
 
-## 4.1 获取面试报告
-
-- Method：`GET`
-- URL：`/interview/report?sessionId=is_20260321_0001`
-- Auth：是
-
-## 4.2 获取会话消息（断线恢复）
-
-- Method：`GET`
-- URL：`/interview/session?sessionId=is_20260321_0001`
-- Auth：是
+2. **decision=end 返回**：
+   - 返回确认消息即可
 
 ---
 
-## 5. 大模型出题策略建议（给后端）
+## 3.4 结束面试
 
-1. 题目生成维度
-- 岗位核心能力（技术深度/问题定位/表达结构）
-- 简历驱动追问（基于 `techStack` 和 `projects`）
-- 渐进难度（前 3 题基础，4-7 题深入，8-10 题综合）
+- Method：`POST`
+- URL：`/interview/end`
+- Auth：是
 
-2. 输出结构规范（建议 JSON）
+### Request Body
 
 ```json
 {
-  "question": "...",
-  "intent": "考察点",
-  "difficulty": 3,
-  "expected_keywords": ["...", "..."],
-  "rubric": {
-    "tech": 0.4,
-    "logic": 0.3,
-    "expression": 0.2,
-    "stability": 0.1
+  "sessionId": "is_20260329_0001",
+  "job_role": "前端开发工程师"
+}
+```
+
+### Success Response
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "sessionId": "is_20260329_0001",
+    "status": "finished",
+    "summary": "整体表现良好，技术深度适中，表达结构清晰。"
   }
 }
 ```
 
-3. 安全与稳定
-- 对用户输入长度做限制（例如 2~3000 字）
-- 对提示词注入做清洗
-- 大模型超时兜底返回固定追问，避免前端卡死
+---
+
+## 3.5 生成分析报告
+
+- Method：`POST`
+- URL：`/interview/analyze`
+- Auth：是
+
+### Request Body
+
+```json
+{
+  "sessionId": "is_20260329_0001",
+  "job_role": "前端开发工程师"
+}
+```
+
+### Success Response
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "id": "report_001",
+    "sessionId": "is_20260329_0001",
+    "finalScore": 84,
+    "summary": "整体回答结构较清晰，项目细节可再深入，建议补充量化结果。",
+    "strengths": ["表达清晰", "回答结构完整"],
+    "weaknesses": ["量化指标不足", "深度追问略保守"],
+    "suggestions": ["复习性能优化实战案例", "准备 STAR 项目叙述模板"],
+    "dimensions": {
+      "tech": 82,
+      "logic": 80,
+      "match": 85,
+      "expression": 84,
+      "stability": 79
+    }
+  }
+}
+```
+
+### 兼容字段
+
+| 推荐字段 | 兼容字段 |
+|---|---|
+| id | reportId, report_id |
+| finalScore | totalScore, total_score, score |
+| summary | comment, feedback |
+| strengths | highlights |
+| weaknesses | improvements |
+| suggestions | advices |
 
 ---
 
-## 6. 前端当前行为说明（已实现）
+## 4. 岗位枚举
 
-前端已接入并调用：
-- `POST /interview/start`
-- `POST /interview/answer`
-- `POST /interview/end`
-
-若接口异常，前端会自动切换“本地模拟追问”，以保证页面可用。
-
-当前建议：
-- `start` 后持久化 `sessionId`（优先 `sessionId`，兼容 `session_id`）。
-- `answer` 后读取题目字段优先级：`nextQuestion` -> `question` -> `reply`。
-- 每轮 UI 显示轮次：`currentRound || round` 与 `totalRounds || total_rounds`。
-- 新增节点选择优先级：
-  1) 若 `awaitChoice === true`：必须先展示“结束/继续”按钮，不要自动跳转。
-  2) 若用户在输入框回复“结束面试/继续问答”，前端自动转换为 `decision=end/continue` 并调用 `POST /interview/decision`。
-  3) 用户点击按钮同样调用 `POST /interview/decision`（或在 `/interview/answer` 里传 `decision`）。
-  4) 选择 `continue` 后，后端需把 `totalRounds` 从 `10` 扩展为 `15`（再下一节点扩展到 `20`，以此类推）。
-  5) 选择 `end` 后，后端返回结束态，前端再调用 `/interview/end` + `/interview/analyze` 进入报告页。
-  6) 仅当 `finished === true` 且 `awaitChoice !== true` 时，才引导调用 `/interview/end`。
-- 严禁使用 `currentRound >= totalRounds` 作为自动结束条件（会误伤第10题节点选择）。
+- 前端开发工程师
+- Java 开发工程师
+- 网络工程师
+- 大模型应用开发工程师
 
 ---
 
-## 7. 联调示例
+## 5. 联调示例
 
-### 7.1 开始面试
+### 5.1 开始面试
 
 ```bash
 curl -X POST 'http://127.0.0.1:3000/api/v1/interview/start' \
@@ -341,140 +498,83 @@ curl -X POST 'http://127.0.0.1:3000/api/v1/interview/start' \
   -d '{"job_role":"前端开发工程师"}'
 ```
 
-### 7.2 提交回答
+### 5.2 提交回答（常规）
 
 ```bash
 curl -X POST 'http://127.0.0.1:3000/api/v1/interview/answer' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <token>' \
   -d '{
-    "sessionId":"is_20260321_0001",
+    "sessionId":"is_20260329_0001",
     "job_role":"前端开发工程师",
     "round":1,
-    "answer":"我负责前端性能优化..."
+    "answer":"我有3年前端经验..."
   }'
 ```
 
-### 7.3 结束面试
+### 5.3 提交回答（第 10 题，触发决策）
+
+```bash
+curl -X POST 'http://127.0.0.1:3000/api/v1/interview/answer' \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' \
+  -d '{
+    "sessionId":"is_20260329_0001",
+    "job_role":"前端开发工程师",
+    "round":10,
+    "answer":"以上就是我的回答..."
+  }'
+```
+
+### 5.4 提交决策（继续）
+
+```bash
+curl -X POST 'http://127.0.0.1:3000/api/v1/interview/decision' \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' \
+  -d '{
+    "sessionId":"is_20260329_0001",
+    "job_role":"前端开发工程师",
+    "decision":"continue"
+  }'
+```
+
+### 5.5 结束面试
 
 ```bash
 curl -X POST 'http://127.0.0.1:3000/api/v1/interview/end' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <token>' \
-  -d '{"sessionId":"is_20260321_0001","job_role":"前端开发工程师"}'
+  -d '{"sessionId":"is_20260329_0001","job_role":"前端开发工程师"}'
 ```
 
 ---
 
-## 8. 验收清单（后端）
+## 6. 验收清单（后端）
 
-- [x] `/interview/start` 可返回首题 + 会话 ID
-- [x] `/interview/answer` 可基于历史轮次生成下一题
-- [x] `/interview/end` 可返回总结与分项评分
-- [x] 所有接口返回统一 `code/message/data`
-- [x] token 校验失败返回 `4010`
-- [x] 接口异常时返回可读 `message`，便于前端提示
-
-以上文档可直接交给后端同学落地“LLM 面试官”接口。
-
----
-
-## 9. 当前后端已落地情况（基于本仓库）
-
-已实现接口：
-- `POST /api/v1/interview/start`
-- `POST /api/v1/interview/answer`
-- `POST /api/v1/interview/chat`（与 `answer` 同逻辑，兼容）
-- `POST /api/v1/interview/end`
-
-已实现能力：
-- LangGraph 工作流：`check_stage -> generate_question`
-- 会话持久化：`interview_sessions`（Mongo，内存回退）
-- 会话状态字段：`sessionId/status/currentRound/totalRounds/messages/stage`
-- 模糊回答判定与追问策略（短答/含“记不清”等关键词）
-
-当前技术实现文件：
-- `services/interview_agent.py`
-- `routes/interview.py`
-- `services/store.py`
-- `app.py`
+| 序号 | 验收项 | 说明 |
+|---|---|---|
+| 1 | start 接口返回首题只有问题 | 不需要 review |
+| 2 | answer 接口第 2~9 题同时返回 review + nextQuestion | 缺一不可 |
+| 3 | answer 接口第 10/15/20 题只返回 review，nextQuestion 为 null | 触发弹窗 |
+| 4 | decision=continue 返回只有 nextQuestion | 不需要 review |
+| 5 | decision=continue 时 totalRounds 更新 | 10→15→20→... |
+| 6 | 字段兼容 | session_id, round, total_rounds 等 |
+| 7 | 错误码正确 | 4010, 4040, 4090 |
+| 8 | **LLM 输出解析** | 必须将 LLM 输出的"评价+纠正"解析到 `review` 字段，"下一题"解析到 `next_question` 字段 |
 
 ---
 
-## 10. DeepSeek 云端配置（已预留）
+## 7. 近期更新（2026-03-29）
 
-设置以下环境变量即可启用云端模型：
+### 需求变更说明
 
-```bash
-export DEEPSEEK_API_KEY='你的key'
-export DEEPSEEK_MODEL='deepseek-v3'
-# 可选，默认即该地址
-export DEEPSEEK_BASE_URL='https://api.deepseek.com/v1/chat/completions'
-```
+面试流程调整为：
 
-说明：
-- 未配置 `DEEPSEEK_API_KEY` 时，后端会返回兜底问题，不会让前端卡死。
-- 后续接入岗位题库/知识图谱时，只需实现 `services/interview_agent.py` 里的检索占位函数。
+1. **首轮发言**（发言1）：只有问题，无点评
+2. **常规发言**（发言2~10）：点评 + 问题
+3. **决策发言**（发言11、17、23...）：只有点评，触发弹窗
+4. **继续后首轮**（发言12、18...）：只有问题，无点评
+5. **继续后常规**（发言13~16、19~22...）：点评 + 问题
 
----
-
-## 11. 前端是否需要改代码？（结论）
-
-需要做**小幅调整**，不是重构。
-
-### 必改项
-
-1. 保证请求地址统一：
-- `BASE_URL = http://127.0.0.1:3000/api/v1`
-
-2. `start` 成功后保存会话 ID：
-- 优先取 `data.sessionId`，兜底 `data.session_id`
-
-3. `answer` 返回题目解析兼容：
-- 按顺序读取 `data.nextQuestion || data.question || data.reply`
-
-4. 轮次字段兼容：
-- `currentRound || round`
-- `totalRounds || total_rounds`
-
-5. 结束条件处理（与前端现状一致）：
-- 优先判断 `awaitChoice`：若 `awaitChoice === true`，必须先展示“结束/继续”按钮，禁止自动跳转
-- 若 `finished === true` 且 `awaitChoice !== true`，前端只提示“请点击结束面试生成报告”，不会自动调用 `/interview/end`，需用户主动点击
-- 禁止使用 `currentRound >= totalRounds` 作为自动结束条件
-
-6. 错误处理：
-- `code === 4010`：跳登录
-- `code === 4040`：提示“会话不存在，请重新开始”
-- `code === 4090`：提示“会话已结束”
-
-### 可选优化
-
-- 优先调用 `/interview/chat`（后端已兼容，当前等价于 `/interview/answer`）。
-- 添加“重试本轮”按钮（网络抖动时不丢会话）。
-
-以上即前端需要同步的改动清单。
-
----
-
-## 12. 新增岗位后的后端操作说明
-
-新增“大模型应用开发工程师”后，后端建议同步做以下操作：
-
-1. 更新岗位列表来源（`/interview/jobs`）
-- 若岗位从数据库读取：向 `jobs` 集合新增一条：
-
-```json
-{ "id": "j_004", "name": "大模型应用开发工程师" }
-```
-
-- 若岗位写死在代码中：在岗位枚举常量中追加该项。
-
-2. 更新出题模板/提示词路由
-- 在 LLM prompt 里新增该岗位的能力维度（如：RAG、Agent、模型评测、推理优化、生产化落地）。
-
-3.（可选）更新首页热岗
-- `/dashboard/home` 的 `hotJobs` 中可新增该岗位，保证首页与岗位选择一致。
-
-4. 验证
-- `GET /api/v1/interview/jobs` 返回包含 `大模型应用开发工程师`。
-- 该岗位调用 `/interview/start` 能正常返回首题。
+每轮 `totalRounds` 递增规则：10 → 15 → 20 → 25 ...

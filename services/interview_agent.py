@@ -20,10 +20,16 @@ SYSTEM_PROMPT = """
 - 每次只问一个问题
 
 【面试策略】
-1) 先根据岗位 {job_role} 考察基础能力。
-2) 再结合候选人简历中的项目经历进行深挖。
-3) 如果候选人回答模糊，必须追问，直到获得可验证细节。
-4) 问题要短、清晰、可回答，避免一次包含多个子问题。
+1) **必须优先从检索到的知识库内容中生成问题**，不要凭空出题
+2) 先根据岗位 {job_role} 考察基础能力
+3) 再结合候选人简历中的项目经历进行深挖
+4) 如果候选人回答模糊，必须追问，直到获得可验证细节
+5) 问题要短、清晰、可回答，避免一次包含多个子问题
+
+【知识库使用规则】
+- 当检索到的知识库片段（retrieved_context）非空时，**必须基于其中的知识点出题**
+- 避免直接问检索片段中的原文，要理解后换一种问法
+- 如果检索内容不足以出题，再结合简历和通用知识
 
 【输出规则】
 - 每场新面试（turn_count=1）必须先说："我是{job_role}岗位的面试官，接下来由我来进行面试。"
@@ -33,9 +39,9 @@ SYSTEM_PROMPT = """
 - 输出保持简洁，控制在 2~4 句。
 - 推荐结构：
     评价：...（1句）
-    纠正：...（可无，若回答正确可写“无明显错误”）
+    纠正：...（可无，若回答正确可写"无明显错误"）
     下一题：...（只问一个问题）
-- 语气像真实技术面试，不要出现“作为AI”。
+- 语气像真实技术面试，不要出现"作为AI"。
 """.strip()
 
 USER_PROMPT = """
@@ -49,12 +55,12 @@ USER_PROMPT = """
 是否模糊回答: {is_vague}
 检索到的知识库片段: {retrieved_context}
 
-请生成“下一句面试问题”。
+请生成"下一句面试问题"。
 
 要求：
 - 如果 turn_count=1 且 last_user_answer 为空：严格输出
     我是{job_role}岗位的面试官，接下来由我来进行面试。第一个问题：...
-- 如果 last_user_answer 不为空：必须先“评价”，再“纠正”，最后“下一题”。
+- 如果 last_user_answer 不为空：必须先"评价"，再"纠正"，最后"下一题"。
 - 严禁一次给出多个并列问题。
 - 若 question_policy.mode=project-lite：可以偶尔提及项目，但不要连续追问项目细节，优先转回基础原理与通用工程能力。
 """.strip()
@@ -159,52 +165,244 @@ def _is_repeated_question(question: str, asked_questions: list[str]) -> bool:
     return False
 
 
-def _alternative_question(job_role: str, stage: str, turn_count: int) -> str:
+def _alternative_question(job_role: str, stage: str, turn_count: int, asked: list[str] | None = None) -> str:
     pools = {
         "tech": [
             "请你解释一下你最熟悉的中间件底层原理，并说出两个常见故障场景与排查步骤。",
             "如果线上接口RT突然抖动，你会如何分层定位（应用、缓存、数据库、网络）？",
             "请说说你做过的一次高并发优化，具体改了哪些点，收益如何量化？",
+            "请描述一次线上故障的排查过程，你使用了哪些工具和方法？",
+            "JVM垃圾回收有哪些算法？各自优缺点是什么？",
+            "如何排查和解决Redis缓存穿透、击穿、雪崩问题？",
+            "分布式系统中，如何保证接口的幂等性？",
+            "请解释一下什么是CAP理论，以及你项目中的应用。",
+            "MySQL索引失效的常见场景有哪些？如何避免？",
+            "请说说HTTP/1.0、HTTP/1.1、HTTP/2的主要区别。",
+            "如何实现一个分布式锁？Redisson有什么优势？",
+            "请解释一下JWT的原理，以及如何在Spring Boot中使用。",
+            "线上接口响应慢如何排查？请列出排查步骤。",
+            "Kafka如何保证消息不丢失？不重复消费呢？",
+            "请说说微服务治理中，熔断、限流、降级的区别和实现。",
         ],
         "project": [
             "请挑一个你主导的项目，讲清业务目标、技术方案、权衡取舍与复盘结果。",
             "同样功能如果重做一次，你会删掉哪些复杂设计？为什么？",
             "请描述一次跨团队联调问题，你如何定位责任边界并推动修复上线？",
+            "你在项目中遇到过最大的技术挑战是什么？如何解决的？",
+            "如果让你重新设计这个项目，你会做哪些改进？",
+            "项目中你如何平衡代码质量和交付进度的矛盾？",
+            "请说说你在项目中实践过的代码审查经验。",
+            "你如何在项目中推动技术债务的偿还？",
+            "请描述一次失败的项目经历，你从中学到了什么？",
+            "项目中如何保证代码的可测试性？",
+            "你参与过的项目中，如何做技术选型？",
+            "请说说你在项目中如何做性能优化的。",
+            "项目中遇到过哪些技术难点，如何突破的？",
+            "你如何评估和引入新的技术方案到项目中？",
+            "请描述你主导的一次技术架构重构。",
         ],
         "closing": [
             "请总结你在该岗位最有竞争力的三项能力，并说明各自的证据。",
             "如果明天入职该岗位，你的前两周技术落地计划是什么？",
             "请说一个你最想继续深挖的技术方向和学习路线。",
+            "你如何看待35岁程序员危机？你做了哪些准备？",
+            "你认为优秀的技术Leader需要具备哪些素质？",
+            "请说说你的职业规划，未来3-5年想达成什么目标？",
+            "你最近在学习什么新技术？有什么收获？",
+            "如果给你一个全新项目，你会如何规划技术架构？",
+            "你在团队中通常扮演什么角色？如何发挥作用的？",
+            "你认为技术人最重要的能力是什么？如何培养？",
+            "请用一个词概括你的技术风格，并解释。",
+            "你收到过最建设性的技术反馈是什么？你如何改进的？",
+            "你对加班文化怎么看？如何平衡工作和生活？",
+            "请说说你在技术分享方面做过的努力。",
+            "你理想中的技术团队是什么样的？",
         ],
     }
     stage_key = stage if stage in pools else "tech"
     arr = pools[stage_key]
-    idx = max(0, int(turn_count or 1) - 1) % len(arr)
-    return f"我是{job_role}岗位的面试官，接下来由我来进行面试。第一个问题：{arr[idx]}" if int(turn_count or 1) == 1 else f"下一题：{arr[idx]}"
+    # 随机选择而非顺序取余，避免循环重复
+    import random
+    available = [q for q in arr if q not in (asked or [])]
+    if not available:
+        available = arr
+    selected = random.choice(available)
+    prefix = f"我是{job_role}岗位的面试官，接下来由我来进行面试。第一个问题：" if int(turn_count or 1) == 1 else "下一题："
+    return f"{prefix}{selected}"
 
 
-def _non_project_question(job_role: str, stage: str, turn_count: int) -> str:
+def _non_project_question(job_role: str, stage: str, turn_count: int, asked: list[str] | None = None) -> str:
     pools = {
         "tech": [
             "请你讲讲 JVM 内存模型，以及你如何定位和处理一次内存泄漏问题。",
             "如果数据库出现慢查询，你会如何从索引、SQL、连接池和锁竞争四个层面定位？",
             "请解释缓存击穿、穿透、雪崩的差异，并给出可落地的治理方案。",
+            "请说说TCP三次握手和四次挥手的过程，以及为什么需要这样设计。",
+            "操作系统中的进程和线程有什么区别？各自适用场景是什么？",
+            "请解释什么是乐观锁和悲观锁，以及各自的实现方式。",
+            "MySQL事务隔离级别有哪些？分别能解决什么问题？",
+            "如何设计一个高可用的分布式系统？",
+            "请说说消息队列在系统架构中的作用，以及选型考虑。",
+            "分布式缓存和本地缓存各自有什么优缺点？如何选择？",
+            "请解释一下什么是服务降级和熔断，它们如何保护系统。",
+            "如何保证分布式系统中的数据一致性？",
+            "请说说容器化技术（Docker/K8s）的基本原理。",
+            "CI/CD流程中，如何保证部署的安全性？",
+            "如何监控线上服务的健康状态？核心指标有哪些？",
         ],
         "project": [
             "请解释你最熟悉的核心技术栈底层原理，并说明在生产环境中的关键参数调优思路。",
             "谈谈你对系统可观测性的理解：日志、指标、链路追踪如何协同定位线上问题？",
             "当系统容量逼近上限时，你会如何做容量评估、扩容方案设计与发布风险控制？",
+            "请说说如何排查和解决一次严重的线上性能瓶颈。",
+            "你在项目中如何做技术选型？考虑哪些因素？",
+            "请描述一次你主导的技术难题攻关过程。",
+            "如何保证微服务架构中的接口兼容性？",
+            "请说说你在项目中如何实现可观测性建设的。",
+            "当多个团队依赖同一个基础服务时，如何协调发布计划？",
+            "请解释一下什么是渐进式发布，如何做线上灰度验证。",
+            "如何在不停服的情况下完成数据库结构变更？",
+            "请说说你的系统如何应对流量突发的场景。",
+            "项目中如何处理第三方服务不稳定的情况？",
+            "请描述一次你参与的线上故障复盘会议。",
+            "你如何在团队中推广和落地新的开发流程或工具？",
         ],
         "closing": [
             "如果让你给初级工程师做一次技术复盘培训，你会如何组织方法论与案例？",
             "请说说你未来半年最想补齐的三项技术能力，以及可执行学习计划。",
             "你如何平衡代码质量、交付速度与稳定性？请给出你的决策原则。",
+            "你认为什么是优秀工程师和普通工程师的最大区别？",
+            "请说说你在过去一年技术能力上有哪些成长。",
+            "如果你加入我们的团队，你首先想改进什么？",
+            "请描述一次你克服技术恐惧的经历。",
+            "你认为技术人最重要的软技能是什么？为什么？",
+            "请说说你在代码之外，如何保持技术敏锐度。",
+            "如果你和上级在技术方案上有分歧，你会如何处理？",
+            "请描述一个让你有成就感的技术项目或成果。",
+            "你如何管理技术债务和业务迭代之间的平衡？",
+            "请说说你在带新人或团队协作方面的经验。",
+            "你认为未来5年你最想深耕的技术方向是什么？",
+            "如果让你重写你的简历，你会如何优化技术描述？",
         ],
     }
     stage_key = stage if stage in pools else "tech"
     arr = pools[stage_key]
-    idx = max(0, int(turn_count or 1) - 1) % len(arr)
-    return f"我是{job_role}岗位的面试官，接下来由我来进行面试。第一个问题：{arr[idx]}" if int(turn_count or 1) == 1 else f"下一题：{arr[idx]}"
+    # 随机选择而非顺序取余
+    import random
+    available = [q for q in arr if q not in (asked or [])]
+    if not available:
+        available = arr
+    selected = random.choice(available)
+    prefix = f"我是{job_role}岗位的面试官，接下来由我来进行面试。第一个问题：" if int(turn_count or 1) == 1 else "下一题："
+    return f"{prefix}{selected}"
+
+
+def _get_kb_question(job_role: str, stage: str, turn_count: int, asked: list[str] | None = None) -> str | None:
+    """
+    直接从知识库文件抽取面试题。
+    优先匹配岗位相关的md文件，提取主题词生成问题。
+    """
+    import random
+    import os
+    from pathlib import Path
+
+    # 岗位到知识库文件的映射
+    kb_dir = Path(__file__).parent.parent / "knowledge"
+    if not kb_dir.exists():
+        return None
+
+    # 匹配岗位关键词
+    role_keywords = {
+        "java": ["java", "后端", "Java"],
+        "前端": ["前端", "前端开发", "Vue", "React", "JavaScript"],
+        "网络": ["网络", "网络工程", "WLAN", "交换机", "路由器"],
+        "大模型": ["大模型", "LLM", "AIGC", "人工智能", "算法"],
+    }
+
+    # 找到匹配的知识库文件
+    matched_file = None
+    role_lower = job_role.lower()
+    for kw, files in role_keywords.items():
+        if any(k in role_lower for k in files):
+            for fp in kb_dir.glob("*.md"):
+                if kw.lower() in fp.name.lower():
+                    matched_file = fp
+                    break
+            if matched_file:
+                break
+
+    if not matched_file:
+        # 尝试找通用文件
+        for fp in kb_dir.glob("*.md"):
+            if "题库" in fp.name and "(副本)" not in fp.name:
+                matched_file = fp
+                break
+        if not matched_file:
+            for fp in kb_dir.glob("*.md"):
+                matched_file = fp
+                break
+
+    if not matched_file or not matched_file.exists():
+        return None
+
+    try:
+        content = matched_file.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+    # 提取完整问题标题，两种格式都支持
+    questions = []
+
+    # 格式1：提取 ### 标题（如 "### Transformer 的整体结构是什么？"）
+    md_headers = re.findall(r'^#{1,3}\s+(.+?)(?:\?|$)', content, re.MULTILINE)
+    chapter_pattern = re.compile(r'^[一二三四五六七八九十]+、')
+    for h in md_headers:
+        h = h.strip()
+        # 过滤章节标题和文件标题
+        if chapter_pattern.match(h):
+            continue
+        if h in ['Java 后端开发工程师面试题库', '大模型应用开发工程师面试题库', '网络工程师面试题库']:
+            continue
+        # 保留包含中文的问答题（长度4-60）
+        h_clean = h.rstrip('？').rstrip('?')
+        if len(h_clean) >= 4 and len(h_clean) <= 60:
+            questions.append(h_clean)
+
+    # 格式2：提取 **加粗** 的内容作为问题（旧格式兼容）
+    bold_questions = re.findall(r'\*\*([^*]+)\*\*[：:]*', content)
+    answer_markers = {'答', '纠正', '评价', '建议', '总结', '反馈', '解释', '说明', '回答', '以下', '原因', '结果', '方案'}
+    for t in bold_questions:
+        if t not in answer_markers:
+            t = re.sub(r'[\n\r\t\s\u3000\xa0]+', '', t).strip()
+            if len(t) >= 3 and len(t) <= 40:
+                questions.append(t)
+
+    if not questions:
+        return None
+
+    # 过滤已问过的问题（使用包含匹配）
+    available = []
+    for q in questions:
+        is_dup = False
+        for asked_q in (asked or []):
+            if asked_q in q or q in asked_q:
+                is_dup = True
+                break
+        if not is_dup:
+            available.append(q)
+
+    if not available:
+        available = questions
+
+    # 随机选择一个问题
+    selected = random.choice(available)
+    question = selected
+
+    # 添加前缀
+    if int(turn_count or 1) == 1:
+        question = f"我是{job_role}岗位的面试官，接下来由我来进行面试。第一个问题：{question}"
+
+    return question
 
 
 def _is_project_heavy_question(text: str) -> bool:
@@ -283,8 +481,10 @@ async def _retrieve_context_advanced(
             if str(x.get("content", "")).strip()
         ]
         return {"context": context, "trace": trace, "retrieval": retrieval}
-    except Exception:
+    except Exception as e:
+        retrieval["error"] = f"{type(e).__name__}: {e}"
         trace.append("🧠 检索链路暂不可用，已切换到模型直出模式。")
+        trace.append(f"⚠️ 检索异常：{type(e).__name__}")
         return {"context": [], "trace": trace, "retrieval": retrieval}
 
 
@@ -378,18 +578,10 @@ async def _check_stage(state: InterviewState) -> InterviewState:
 
 
 async def _generate_question(state: InterviewState) -> InterviewState:
-    retrieved_pack = await _retrieve_context_advanced(
-        job_role=state["job_role"],
-        stage=state["stage"],
-        resume_data=state.get("resume_data", {}),
-        last_user_answer=state.get("last_user_answer", ""),
-        knowledge_scope=state.get("knowledge_scope", ""),
-        question_policy=state.get("question_policy") or {},
-    )
-    retrieved = retrieved_pack.get("context") or []
-    state["retrieved_context"] = retrieved
-    state["trace"] = retrieved_pack.get("trace") or []
-    state["retrieval"] = retrieved_pack.get("retrieval") or {}
+    # 不再使用 ChromaDB 检索，直接用纯 LLM 生成问题
+    state["retrieved_context"] = []
+    state["trace"] = []
+    state["retrieval"] = {}
 
     template = ChatPromptTemplate.from_messages(
         [
@@ -406,7 +598,7 @@ async def _generate_question(state: InterviewState) -> InterviewState:
         history=state.get("history", [])[-6:],
         last_user_answer=state.get("last_user_answer", ""),
         is_vague=state.get("is_vague", False),
-        retrieved_context=retrieved,
+        retrieved_context=[],
     )
     prompt_messages = [{"role": _map_role(m.type), "content": m.content} for m in messages]
 
@@ -417,7 +609,6 @@ async def _generate_question(state: InterviewState) -> InterviewState:
 
     last_answer = (state.get("last_user_answer") or "").strip()
     if last_answer:
-        # 当模型不可用或返回过于模板化兜底文本时，使用本地规则生成“基于回答内容”的反馈
         if ("你的回答信息不足" in question or "你的回答较笼统" in question) and len(last_answer) >= 18:
             question = _local_feedback_from_answer(last_answer, state.get("job_role") or "通用技术")
 
@@ -434,6 +625,7 @@ async def _generate_question(state: InterviewState) -> InterviewState:
             job_role=state.get("job_role") or "通用技术岗",
             stage=state.get("stage") or "tech",
             turn_count=int(state.get("turn_count", 1)),
+            asked=asked,
         )
 
     if avoid_repeat and _is_repeated_question(question, asked):
@@ -442,12 +634,39 @@ async def _generate_question(state: InterviewState) -> InterviewState:
                 job_role=state.get("job_role") or "通用技术岗",
                 stage=state.get("stage") or "tech",
                 turn_count=int(state.get("turn_count", 1)),
+                asked=asked,
             )
         else:
             question = _alternative_question(
                 job_role=state.get("job_role") or "通用技术岗",
                 stage=state.get("stage") or "tech",
                 turn_count=int(state.get("turn_count", 1)),
+                asked=asked,
+            )
+
+    if avoid_repeat and _is_repeated_question(question, asked):
+        # 优先从知识库抽取题目，而不是使用硬编码的备用题
+        kb_q = _get_kb_question(
+            job_role=state.get("job_role") or "通用技术岗",
+            stage=state.get("stage") or "tech",
+            turn_count=int(state.get("turn_count", 1)),
+            asked=asked,
+        )
+        if kb_q:
+            question = kb_q
+        elif mode == "project-lite":
+            question = _non_project_question(
+                job_role=state.get("job_role") or "通用技术岗",
+                stage=state.get("stage") or "tech",
+                turn_count=int(state.get("turn_count", 1)),
+                asked=asked,
+            )
+        else:
+            question = _alternative_question(
+                job_role=state.get("job_role") or "通用技术岗",
+                stage=state.get("stage") or "tech",
+                turn_count=int(state.get("turn_count", 1)),
+                asked=asked,
             )
 
     state["next_question"] = question

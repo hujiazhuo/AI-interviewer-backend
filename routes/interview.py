@@ -30,24 +30,82 @@ def _report_id():
 
 def _normalize_decision(value: str) -> str:
     v = (value or "").strip().lower()
-    if v in ["end", "finish", "stop", "结束", "结束面试", "quit"]:
+    if v in ["end", "finish", "stop", "结束", "结束面试", "结束问答", "quit"]:
         return "end"
-    if v in ["continue", "cont", "继续", "继续问答", "next"]:
+    if v in ["continue", "cont", "继续", "继续问答", "继续面试", "next"]:
         return "continue"
     return ""
 
 
-def _build_checkpoint_message(feedback: str) -> str:
+def _build_checkpoint_message(feedback: str, answered_round: int) -> str:
     fb = (feedback or "").strip()
     if not fb:
         fb = "评价：你本阶段整体表现稳定，建议继续保持结构化表达。"
+    # 防止点评文案中夹带“下一题”导致前端误判为继续提问
+    cleaned_lines = []
+    for raw in fb.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("下一题"):
+            continue
+        if "?" in line or "？" in line:
+            continue
+        cleaned_lines.append(line)
+    fb = "\n".join(cleaned_lines) or "评价：本轮回答完成，建议继续保持结构化表达与证据支撑。"
     return (
         f"{fb}\n"
-        "本次面试已到阶段节点。"
-        "你可以选择：\n"
-        "- 结束面试（进入评分环节）\n"
-        "- 继续问答（追加 5 道题）"
+        f"你已完成第{max(1, int(answered_round or 1))}题。"
+        "请在下方按钮中选择“继续问答”或“结束面试”。"
     )
+
+
+def _normalize_continue_question(text: str) -> str:
+    raw = (text or “”).strip()
+    if not raw:
+        return “请说明你做过的一个复杂故障排查案例，并给出关键证据与结果。”
+
+    # 优先提取”下一题：”后的题干
+    if “下一题：” in raw:
+        candidate = raw.split(“下一题：”)[-1].strip()
+        # 清理可能残留的前缀
+        for prefix in [“问题：”, “第11题：”, “第十一题：”, “请回答：”]:
+            if candidate.startswith(prefix):
+                candidate = candidate[len(prefix) :].strip()
+        return candidate
+
+    # “第一个问题：” 格式（首轮）
+    if “第一个问题：” in raw:
+        candidate = raw.split(“第一个问题：”)[-1].strip()
+        for prefix in [“问题：”, “请回答：”]:
+            if candidate.startswith(prefix):
+                candidate = candidate[len(prefix) :].strip()
+        return candidate
+
+    # 无法解析时返回默认题
+    return “请说明你做过的一个复杂故障排查案例，并给出关键证据与结果。”
+
+
+def _extract_review_text(text: str, default_hint: str = "") -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return (default_hint or "回答已收到，建议继续补充细节与量化结果。")
+
+    rows = [x.strip() for x in raw.splitlines() if x.strip()]
+    review_lines = []
+    for line in rows:
+        if line.startswith(("评价：", "纠正：", "建议：", "总结：", "反馈：")):
+            review_lines.append(line)
+
+    if review_lines:
+        return "\n".join(review_lines[:2])
+
+    if "下一题：" in raw:
+        head = raw.split("下一题：", 1)[0].strip()
+        if head:
+            return head
+
+    return (default_hint or "回答已收到，建议继续补充细节与量化结果。")
 
 
 def _is_checkpoint_round(answered_round: int, base_rounds: int, cycle_rounds: int) -> bool:
@@ -99,9 +157,17 @@ def _checkpoint_payload(session: dict, prompt: str) -> dict:
     }
 
 
-def _handle_decision(user, session, session_id: str, decision: str):
-    pending = bool(session.get("decision_pending"))
-    if not pending:
+def _can_decide_now(session: dict) -> bool:
+    if bool(session.get("decision_pending")):
+        return True
+    current_round = int(session.get("currentRound") or 1)
+    total = int(session.get("totalRounds") or 10)
+    # 兼容新前端：当 currentRound >= totalRounds 时，允许直接调用 decision
+    return current_round >= total
+
+
+def _handle_decision(user, session, session_id: str, decision: str, body: dict | None = None):
+    if not _can_decide_now(session):
         return 409, err(4090, "当前无需选择结束或继续")
 
     d = _normalize_decision(decision)
@@ -112,6 +178,7 @@ def _handle_decision(user, session, session_id: str, decision: str):
     cycle_rounds = max(1, int(session.get("cycleRounds") or 5))
     total = int(session.get("totalRounds") or 10)
     messages = list(session.get("messages") or [])
+    body = body or {}
 
     if d == "end":
         closing_text = "好的，本轮到此结束。5秒后将进入评分环节，请稍候。"
@@ -129,14 +196,20 @@ def _handle_decision(user, session, session_id: str, decision: str):
         return 200, ok(
             {
                 "currentRound": current_round,
+                "current_round": current_round,
                 "round": current_round,
                 "totalRounds": total,
                 "total_rounds": total,
+                "sessionId": session_id,
+                "session_id": session_id,
                 "decision": "end",
-                "decisionDelayMs": 5000,
+                "status": "finished",
+                "decisionDelayMs": 500,
                 "nextAction": "analyze",
+                "message": closing_text,
                 "question": closing_text,
                 "nextQuestion": closing_text,
+                "awaitChoice": False,
                 "finished": True,
             }
         )
@@ -144,6 +217,12 @@ def _handle_decision(user, session, session_id: str, decision: str):
     # continue
     new_total = total + cycle_rounds
     next_round = current_round + 1
+    question_policy = body.get("question_policy") or session.get("question_policy") or {}
+    knowledge_scope = (body.get("knowledge_scope") or session.get("knowledge_scope") or "").strip()
+    asked_questions = body.get("asked_questions")
+    if not isinstance(asked_questions, list):
+        asked_questions = list(session.get("asked_questions") or [])
+
     result = asyncio.run(
         next_question(
             user_id=user["userId"],
@@ -152,14 +231,15 @@ def _handle_decision(user, session, session_id: str, decision: str):
             turn_count=next_round,
             history=messages,
             user_answer="",
-            question_policy=session.get("question_policy") or {},
-            knowledge_scope=session.get("knowledge_scope") or "",
-            asked_questions=session.get("asked_questions") or [],
+            question_policy=question_policy,
+            knowledge_scope=knowledge_scope,
+            asked_questions=asked_questions,
         )
     )
-    next_q = result.get("question") or "下一题：请你说明一次你解决复杂线上问题的完整排查路径。"
+    next_q = _normalize_continue_question(
+        result.get("question") or "请你说明一次你解决复杂线上问题的完整排查路径。"
+    )
     messages.append({"role": "ai", "content": next_q, "ts": now_iso()})
-    asked_questions = list(session.get("asked_questions") or [])
     asked_questions = (asked_questions + [next_q])[-30:]
 
     store.update_interview_session(
@@ -172,6 +252,8 @@ def _handle_decision(user, session, session_id: str, decision: str):
             "last_decision": "continue",
             "currentRound": next_round,
             "totalRounds": new_total,
+            "question_policy": question_policy,
+            "knowledge_scope": knowledge_scope,
             "asked_questions": asked_questions,
         },
     )
@@ -180,14 +262,19 @@ def _handle_decision(user, session, session_id: str, decision: str):
         {
             # 与文档对齐：continue 后 currentRound 指向“下一题轮次”
             "currentRound": next_round,
+            "current_round": next_round,
             "round": next_round,
             "answeredRound": current_round,
             "nextQuestionRound": next_round,
             "totalRounds": new_total,
             "total_rounds": new_total,
+            "sessionId": session_id,
+            "session_id": session_id,
             "decision": "continue",
-            "decisionDelayMs": 5000,
+            "decisionDelayMs": 500,
+            "awaitChoice": False,
             "nextQuestion": next_q,
+            "next_question": next_q,
             "question": next_q,
             "trace": result.get("trace") or [],
             "retrieval": result.get("retrieval") or {},
@@ -278,11 +365,11 @@ def answer(user, body):
         return 409, err(4090, "会话已结束")
 
     if decision:
-        return _handle_decision(user, session, session_id, decision)
+        return _handle_decision(user, session, session_id, decision, body)
 
     if bool(session.get("decision_pending")):
         prompt = _latest_ai_message(session.get("messages") or [])
-        return 200, ok(_checkpoint_payload(session, prompt))
+        return 409, err(4090, prompt or "当前轮次已完成，请先选择继续问答或结束面试")
 
     if not answer_text:
         return 400, err(4001, "参数校验失败")
@@ -302,7 +389,8 @@ def answer(user, body):
     total = int(session.get("totalRounds") or 10)
     base_rounds = int(session.get("baseRounds") or 10)
     cycle_rounds = int(session.get("cycleRounds") or 5)
-    reached_checkpoint = _is_checkpoint_round(current_round, base_rounds, cycle_rounds)
+    # 兜底：当到达当前总题数上限时，必须先进入点评+决策，不直接继续出下一题
+    reached_checkpoint = _is_checkpoint_round(current_round, base_rounds, cycle_rounds) or (current_round >= total)
 
     if reached_checkpoint:
         feedback = asyncio.run(
@@ -311,7 +399,7 @@ def answer(user, body):
                 user_answer=answer_text,
             )
         )
-        prompt = _build_checkpoint_message(feedback)
+        prompt = _build_checkpoint_message(feedback, current_round)
         messages.append({"role": "ai", "content": prompt, "ts": now_iso()})
         store.update_interview_session(
             session_id,
@@ -323,8 +411,36 @@ def answer(user, body):
                 "decision_pending": True,
             },
         )
-        latest_session = store.get_interview_session(session_id, user["userId"]) or session
-        return 200, ok(_checkpoint_payload(latest_session, prompt))
+        return 200, ok(
+            {
+                "currentRound": current_round,
+                "round": current_round,
+                "totalRounds": total,
+                "total_rounds": total,
+                "answeredRound": current_round,
+                "nextQuestionRound": current_round,
+                # 文档要求：第10/15/20题必须 awaitChoice=true 触发弹窗，nextQuestion=null
+                "awaitChoice": True,
+                "mustChoose": True,
+                "phase": "checkpoint",
+                "status": "checkpoint",
+                "checkpoint": True,
+                "decisionOptions": ["end", "continue"],
+                # 与对接文档保持兼容：点评文案多字段兜底
+                "review": prompt,
+                "comment": prompt,
+                "feedback": prompt,
+                "summary": prompt,
+                "message": prompt,
+                "checkpointComment": prompt,
+                # 阶段收口：仅点评，nextQuestion 必须为 null
+                "nextQuestion": None,
+                "question": None,
+                "reply": None,
+                "finished": False,
+                "instantFeedback": {"keyword": ["完成本轮"], "scoreHint": 84},
+            }
+        )
 
     result = asyncio.run(
         next_question(
@@ -339,7 +455,12 @@ def answer(user, body):
             asked_questions=asked_questions,
         )
     )
-    next_q = result["question"]
+    raw_question = result.get("question") or ""
+    next_q = _normalize_continue_question(raw_question)
+    review_text = _extract_review_text(
+        raw_question,
+        default_hint=("你的回答还可以更具体一些，建议补充关键指标与验证方式。" if result.get("is_vague") else "你的回答已覆盖核心点，建议继续保持结构化表达。"),
+    )
     messages.append({"role": "ai", "content": next_q, "ts": now_iso()})
     asked_questions = (asked_questions + [next_q])[-20:]
 
@@ -369,6 +490,10 @@ def answer(user, body):
             "nextQuestion": next_q,
             "question": next_q,
             "reply": next_q,
+            "review": review_text,
+            "comment": review_text,
+            "feedback": review_text,
+            "summary": review_text,
             "trace": result.get("trace") or [],
             "retrieval": result.get("retrieval") or {},
             "finished": False,
@@ -430,7 +555,7 @@ def decision(user, body):
     if not session:
         return 404, err(4040, "会话不存在")
     d = body.get("decision") or body.get("interview_action") or body.get("action") or ""
-    return _handle_decision(user, session, session_id, d)
+    return _handle_decision(user, session, session_id, d, body)
 
 
 def session(user, query: str = ""):
